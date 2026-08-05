@@ -718,6 +718,201 @@ public sealed partial class UIAutomationService
         }
     }
 
+    /// <summary>
+    /// Double-clicks an element addressed by its stable element id.
+    /// </summary>
+    /// <param name="elementId">The element id from a prior find/snapshot.</param>
+    /// <param name="windowHandle">Optional window handle to activate before clicking.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The result of the double-click.</returns>
+    /// <remarks>
+    /// UI Automation has no double-click pattern, so this is always a physical double-click at the element's
+    /// clickable point - unlike <see cref="ClickElementAsync"/>, which prefers semantic patterns like Invoke.
+    /// </remarks>
+    public async Task<UIAutomationResult> DoubleClickElementAsync(string elementId, string? windowHandle, CancellationToken cancellationToken = default)
+    {
+        var stopwatch = Stopwatch.StartNew();
+
+        try
+        {
+            return await PerformDoubleClickAsync(elementId, windowHandle, fallbackClickPoint: null, stopwatch, cancellationToken);
+        }
+        catch (COMException ex)
+        {
+            LogFindAndClickError(_logger, elementId, ex);
+            return UIAutomationResult.CreateFailure(
+                "double_click",
+                COMExceptionHelper.IsElementStale(ex) ? UIAutomationErrorType.ElementStale : UIAutomationErrorType.InternalError,
+                COMExceptionHelper.GetErrorMessage(ex, "Double-click"),
+                CreateDiagnostics(stopwatch));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            LogFindAndClickError(_logger, elementId, ex);
+            return UIAutomationResult.CreateFailure(
+                "double_click",
+                UIAutomationErrorType.InternalError,
+                $"Double-click failed: {ex.Message}",
+                CreateDiagnostics(stopwatch));
+        }
+    }
+
+    /// <summary>
+    /// Finds an element by selectors and double-clicks it.
+    /// </summary>
+    /// <param name="query">The element query.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The result of the double-click.</returns>
+    public async Task<UIAutomationResult> FindAndDoubleClickAsync(ElementQuery query, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(query);
+        var stopwatch = Stopwatch.StartNew();
+
+        try
+        {
+            var findResult = await FindElementsAsync(query, cancellationToken);
+            if (!findResult.Success || findResult.Items == null || findResult.Items.Length == 0)
+            {
+                return UIAutomationResult.CreateFailure(
+                    "double_click",
+                    UIAutomationErrorType.ElementNotFound,
+                    findResult.ErrorMessage ?? "Element not found.",
+                    CreateDiagnostics(stopwatch));
+            }
+
+            var targetElement = findResult.Items[0];
+
+            // Same cached-bounds fallback as FindAndClickAsync: current bounds can be 0,0,0,0 for
+            // controls like WinForms TabPage children even while they are visible.
+            Point? fallbackClickPoint = null;
+            if (targetElement.Click != null && targetElement.Click.Length >= 2)
+            {
+                var monitorIndex = targetElement.Click.Length >= 3 ? targetElement.Click[2] : 0;
+                var monitorOrigin = _coordinateConverter.GetMonitorOrigin(monitorIndex);
+                fallbackClickPoint = new Point(
+                    targetElement.Click[0] + monitorOrigin.X,
+                    targetElement.Click[1] + monitorOrigin.Y);
+            }
+
+            return await PerformDoubleClickAsync(targetElement.Id, query.WindowHandle, fallbackClickPoint, stopwatch, cancellationToken);
+        }
+        catch (COMException ex)
+        {
+            LogFindAndClickError(_logger, query.Name ?? query.AutomationId ?? "unknown", ex);
+            return UIAutomationResult.CreateFailure(
+                "double_click",
+                COMExceptionHelper.IsElementStale(ex) ? UIAutomationErrorType.ElementStale : UIAutomationErrorType.InternalError,
+                COMExceptionHelper.GetErrorMessage(ex, "Double-click"),
+                CreateDiagnostics(stopwatch));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            LogFindAndClickError(_logger, query.Name ?? query.AutomationId ?? "unknown", ex);
+            return UIAutomationResult.CreateFailure(
+                "double_click",
+                UIAutomationErrorType.InternalError,
+                $"Double-click failed: {ex.Message}",
+                CreateDiagnostics(stopwatch));
+        }
+    }
+
+    private async Task<UIAutomationResult> PerformDoubleClickAsync(
+        string elementId,
+        string? windowHandle,
+        Point? fallbackClickPoint,
+        Stopwatch stopwatch,
+        CancellationToken cancellationToken)
+    {
+        nint? activationHandle = null;
+        if (!string.IsNullOrWhiteSpace(windowHandle))
+        {
+            if (!WindowHandleParser.TryParse(windowHandle, out var parsedHandle))
+            {
+                return UIAutomationResult.CreateFailure(
+                    "double_click",
+                    UIAutomationErrorType.InvalidParameter,
+                    $"Invalid windowHandle '{windowHandle}'. Expected decimal string from window_management(handle).",
+                    CreateDiagnostics(stopwatch));
+            }
+
+            activationHandle = parsedHandle;
+        }
+
+        var prepared = await _staThread.ExecuteAsync(() =>
+        {
+            var element = ElementIdGenerator.ResolveToAutomationElement(elementId);
+            if (element == null)
+            {
+                return (Failure: UIAutomationResult.CreateFailure(
+                    "double_click",
+                    UIAutomationErrorType.ElementNotFound,
+                    $"Element with ID '{elementId}' could not be resolved.",
+                    CreateDiagnostics(stopwatch)), Element: (UIA.IUIAutomationElement?)null, Point: (Point?)null);
+            }
+
+            TryActivateWindowForElement(element, activationHandle);
+            if (!element.IsEnabled())
+            {
+                return (Failure: UIAutomationResult.CreateFailure(
+                    "double_click",
+                    UIAutomationErrorType.InvalidParameter,
+                    $"Element with ID '{elementId}' is disabled and cannot be double-clicked. " +
+                    "Wait for it to become enabled (e.g., after filling required fields) or target a different element.",
+                    CreateDiagnostics(stopwatch)), Element: (UIA.IUIAutomationElement?)null, Point: (Point?)null);
+            }
+
+            return (Failure: (UIAutomationResult?)null, Element: element, Point: GetClickablePointForClick(element) ?? fallbackClickPoint);
+        }, cancellationToken);
+
+        if (prepared.Failure != null)
+        {
+            return prepared.Failure;
+        }
+
+        if (!prepared.Point.HasValue)
+        {
+            return UIAutomationResult.CreateFailure(
+                "double_click",
+                UIAutomationErrorType.PatternNotSupported,
+                $"Element with ID '{elementId}' has no clickable point, so it cannot be double-clicked.",
+                CreateDiagnostics(stopwatch));
+        }
+
+        var clickResult = await _mouseService.DoubleClickAsync(
+            prepared.Point.Value.X,
+            prepared.Point.Value.Y,
+            cancellationToken: cancellationToken);
+        if (!clickResult.Success)
+        {
+            return UIAutomationResult.CreateFailure(
+                "double_click",
+                UIAutomationErrorType.InternalError,
+                clickResult.Error ?? "The double-click could not be completed.",
+                CreateDiagnostics(stopwatch));
+        }
+
+        return await _staThread.ExecuteAsync(() =>
+        {
+            // A double-click commonly opens/closes the element's window, so a stale element here is success.
+            UIElementInfo? info;
+            try
+            {
+                info = ConvertToElementInfo(prepared.Element!, GetRootElementForScroll(prepared.Element!), _coordinateConverter);
+            }
+            catch (COMException)
+            {
+                info = null;
+            }
+
+            return info is null
+                ? UIAutomationResult.CreateSuccessWithHint(
+                    "double_click",
+                    "Double-click succeeded. Element closed or changed its parent window or dialog.",
+                    CreateDiagnostics(stopwatch))
+                : UIAutomationResult.CreateSuccessCompact("double_click", [info], CreateDiagnostics(stopwatch));
+        }, cancellationToken);
+    }
+
     /// <inheritdoc/>
     public async Task<UIAutomationResult> HighlightElementAsync(string elementId, CancellationToken cancellationToken = default)
     {

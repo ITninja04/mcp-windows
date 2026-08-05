@@ -87,8 +87,8 @@ internal static class HelpText
             options: --text --key --modifiers --repeat --sequence --inter-key-delay-ms --clear-first
 
         mouse <action> [options]
-            actions: move, click, double_click, right_click, middle_click, drag, scroll, get_position
-            options: --x --y --end-x --end-y --direction --amount --modifiers --button
+            actions: move, click, double_click, right_click, middle_click, drag, polyline, scroll, get_position
+            options: --x --y --end-x --end-y --points --direction --amount --modifiers --button
                      --target --monitor-index --window --expected-window-title --expected-process-name
 
         screenshot [action] [options]
