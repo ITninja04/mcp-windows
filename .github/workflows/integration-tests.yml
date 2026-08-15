@@ -32,7 +32,6 @@ concurrency:
 env:
   AZURE_RESOURCE_GROUP: rg-windows-mcp-runner
   AZURE_VM_NAME: vm-windows-mcp-runner
-  AZURE_PUBLIC_IP_NAME: vm-windows-mcp-runner-ip
 
 jobs:
   start-runner:
@@ -52,22 +51,11 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Checkout runner scripts
-        uses: actions/checkout@v6
-
       - name: Start VM
         run: >-
           az vm start
           --resource-group "$AZURE_RESOURCE_GROUP"
           --name "$AZURE_VM_NAME"
-
-      - name: Initialize interactive desktop
-        shell: pwsh
-        run: |
-          infrastructure/azure/initialize-desktop.ps1 `
-            -ResourceGroup $env:AZURE_RESOURCE_GROUP `
-            -VmName $env:AZURE_VM_NAME `
-            -PublicIpName $env:AZURE_PUBLIC_IP_NAME
 
       - name: Set four-hour shutdown watchdog
         shell: pwsh
@@ -92,7 +80,7 @@ jobs:
       MCP_TEST_CHROME: '1'
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v6
@@ -210,6 +198,33 @@ jobs:
           Get-Process electron, chrome, msedge, notepad, calculatorapp -ErrorAction SilentlyContinue |
             Where-Object SessionId -eq (Get-Process -Id $PID).SessionId |
             ForEach-Object { Stop-Process -Id $_.Id -Force }
+
+  integration-gate:
+    name: PR integration tests
+    if: always()
+    needs: [start-runner, integration-tests]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce integration result
+        shell: pwsh
+        env:
+          START_RESULT: ${{ needs.start-runner.result }}
+          TEST_RESULT: ${{ needs.integration-tests.result }}
+        run: |
+          if ($env:GITHUB_EVENT_NAME -eq "pull_request" -and
+              "${{ github.event.pull_request.draft }}" -eq "true") {
+            Write-Host "Integration tests are deferred until the pull request is ready for review."
+            exit 0
+          }
+
+          if ($env:GITHUB_EVENT_NAME -eq "pull_request" -and
+              "${{ github.event.pull_request.head.repo.full_name }}" -ne $env:GITHUB_REPOSITORY) {
+            throw "Fork pull requests cannot execute untrusted code on the self-hosted runner. Move the reviewed commit to a repository branch before merging."
+          }
+
+          if ($env:START_RESULT -ne "success" -or $env:TEST_RESULT -ne "success") {
+            throw "Windows UI integration tests did not pass (runner: $env:START_RESULT, tests: $env:TEST_RESULT)."
+          }
 
   deallocate-runner:
     name: Deallocate Windows UI runner

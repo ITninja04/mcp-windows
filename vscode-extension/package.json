@@ -15,7 +15,7 @@
   "homepage": "https://github.com/sbroenne/mcp-windows",
   "license": "MIT",
   "engines": {
-    "vscode": "^1.120.0"
+    "vscode": "^1.125.0"
   },
   "os": [
     "win32"
@@ -68,7 +68,7 @@
   },
   "devDependencies": {
     "@types/node": "^26.1.2",
-    "@types/vscode": "1.120.0",
+    "@types/vscode": "1.125.0",
     "@vscode/vsce": "^3.9.2",
     "oxlint": "^1.74.0",
     "typescript": "^7.0.2"
