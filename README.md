@@ -70,6 +70,8 @@ On first use, the plugin downloads the current standalone release into `plugin\b
 
 **HTTP** — Run `Sbroenne.WindowsMcp.exe --transport http` to serve Streamable HTTP on `http://127.0.0.1:8765/mcp` (loopback only by default), then `claude mcp add --transport http windows http://127.0.0.1:8765/mcp`. See [Transports](FEATURES.md#transports).
 
+**Remote (Tailscale)** — `Sbroenne.WindowsMcp.exe --tailscale --allow you@github` serves the HTTP transport behind Tailscale Serve, tailnet-only, with per-user identity checks and no public exposure. See [Remote access over Tailscale](docs/remote-access-tailscale.md).
+
 ## Tools
 
 | Tool | Purpose |

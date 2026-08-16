@@ -800,6 +800,17 @@ The HTTP host binds only the address you ask for and ignores `ASPNETCORE_URLS`, 
 
 Add an HTTP server to Claude Code with `claude mcp add --transport http windows http://127.0.0.1:8765/mcp`.
 
+### Remote access over Tailscale
+
+To reach the server from another machine, run it behind Tailscale Serve instead of exposing a port. In `--tailscale` mode the server binds loopback, starts and supervises a foreground `tailscale serve` child so the tailnet route lives only while the server runs, requires every request to carry a Tailscale identity header cross-checked with `tailscale whois`, and matches the caller against an `--allow` list. Funnel (public internet exposure) is refused.
+
+```powershell
+Sbroenne.WindowsMcp.exe --tailscale --allow you@github --tailscale-check   # verify readiness
+Sbroenne.WindowsMcp.exe --tailscale --allow you@github                     # serve
+```
+
+Then on the client: `claude mcp add --transport http windows https://thishost.your-tailnet.ts.net/mcp`. Full setup, the logon-task recipe, and troubleshooting are in [Remote access over Tailscale](docs/remote-access-tailscale.md).
+
 ---
 
 ## Known Limitations
