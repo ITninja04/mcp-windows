@@ -310,7 +310,7 @@ public static partial class MouseControlTool
                                 $"Point {i} ({point.X}, {point.Y}) out of bounds for monitor {targetMonitorIndex}",
                                 errorDetails: new Dictionary<string, object>
                                 {
-                                    { "valid_bounds", new { left = monitor.X, top = monitor.Y, right = monitor.X + monitor.Width, bottom = monitor.Y + monitor.Height } },
+                                    { "valid_bounds", new { left = 0, top = 0, right = monitor.Width, bottom = monitor.Height } },
                                     { "provided_coordinates", new { x = point.X, y = point.Y } }
                                 });
                             return ToCallToolResult(result);
@@ -327,7 +327,7 @@ public static partial class MouseControlTool
                             $"Coordinates ({x.Value}, {y.Value}) out of bounds for monitor {targetMonitorIndex}",
                             errorDetails: new Dictionary<string, object>
                             {
-                                { "valid_bounds", new { left = monitor.X, top = monitor.Y, right = monitor.X + monitor.Width, bottom = monitor.Y + monitor.Height } },
+                                { "valid_bounds", new { left = 0, top = 0, right = monitor.Width, bottom = monitor.Height } },
                                 { "provided_coordinates", new { x = x.Value, y = y.Value } }
                             });
                         return ToCallToolResult(result);
@@ -343,7 +343,7 @@ public static partial class MouseControlTool
                             $"End coordinates ({endX.Value}, {endY.Value}) out of bounds for monitor {targetMonitorIndex}",
                             errorDetails: new Dictionary<string, object>
                             {
-                                { "valid_bounds", new { left = monitor.X, top = monitor.Y, right = monitor.X + monitor.Width, bottom = monitor.Y + monitor.Height } },
+                                { "valid_bounds", new { left = 0, top = 0, right = monitor.Width, bottom = monitor.Height } },
                                 { "provided_coordinates", new { x = endX.Value, y = endY.Value } }
                             });
                         return ToCallToolResult(result);
@@ -429,8 +429,10 @@ public static partial class MouseControlTool
 
             return ToCallToolResult(operationResult);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
+            // Only the internal timeout is reported as a result; caller cancellation propagates so callers
+            // (including ui_batch) see a cancelled request rather than a fabricated timeout.
             var errorResult = MouseControlResult.CreateFailure(
                 MouseControlErrorCode.OperationTimeout,
                 $"Operation timed out after {WindowsToolsBase.TimeoutMs}ms");
@@ -640,12 +642,6 @@ public static partial class MouseControlTool
         return await WindowsToolsBase.MouseInputService.DragAsync(startX.Value, startY.Value, endX.Value, endY.Value, mouseButton, cancellationToken);
     }
 
-    /// <summary>
-    /// Delay between successive polyline vertices. Windows coalesces back-to-back absolute moves, which
-    /// drops vertices in drawing applications; a few milliseconds is enough for each point to be delivered.
-    /// </summary>
-    private const int PolylinePointDelayMs = 5;
-
     private static async Task<MouseControlResult> HandlePolylineAsync(List<Coordinates>? points, string? buttonString, string? modifiersString, CancellationToken cancellationToken)
     {
         if (points is null || points.Count < 2)
@@ -671,7 +667,7 @@ public static partial class MouseControlTool
 
         var mouseButton = ParseMouseButton(buttonString);
         var modifierKeys = ParseModifiers(modifiersString);
-        return await WindowsToolsBase.MouseInputService.StrokeAsync(points, mouseButton, modifierKeys, PolylinePointDelayMs, cancellationToken);
+        return await WindowsToolsBase.MouseInputService.StrokeAsync(points, mouseButton, modifierKeys, cancellationToken);
     }
 
     /// <summary>

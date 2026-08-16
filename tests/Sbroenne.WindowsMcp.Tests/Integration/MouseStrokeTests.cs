@@ -49,7 +49,7 @@ public sealed class MouseStrokeTests : IDisposable
         _fixture.EnsureTestWindowForeground();
 
         // Act
-        var result = await _fixture.MouseInputService.StrokeAsync(points, MouseButton.Left, ModifierKey.None, pointDelayMs: 5);
+        var result = await _fixture.MouseInputService.StrokeAsync(points, MouseButton.Left, ModifierKey.None);
 
         // Assert - API reports success and the cursor finished on the last vertex
         Assert.True(result.Success, $"Expected success, got {result.ErrorCode}: {result.ErrorMessage}");
@@ -74,7 +74,7 @@ public sealed class MouseStrokeTests : IDisposable
         var panel = _fixture.GetDragPanelBounds();
 
         // Act
-        var result = await _fixture.MouseInputService.StrokeAsync(points, MouseButton.Left, ModifierKey.None, pointDelayMs: 5);
+        var result = await _fixture.MouseInputService.StrokeAsync(points, MouseButton.Left, ModifierKey.None);
         Assert.True(result.Success, $"Expected success, got {result.ErrorCode}: {result.ErrorMessage}");
 
         await Task.Delay(150);

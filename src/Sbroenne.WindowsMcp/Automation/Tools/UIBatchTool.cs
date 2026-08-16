@@ -399,7 +399,7 @@ public static partial class UIBatchTool
             step.EndX,
             step.EndY,
             step.Direction,
-            step.Amount > 0 ? step.Amount : 1,
+            step.Amount,
             step.Modifiers,
             step.Button,
             step.MonitorIndex,
@@ -408,6 +408,9 @@ public static partial class UIBatchTool
             effectiveHandle,
             pointsJson,
             cancellationToken);
+
+        // mouse_control reports its own timeout as a result; make sure a cancelled caller never reads as one.
+        cancellationToken.ThrowIfCancellationRequested();
 
         var payload = callResult.Content.OfType<TextContentBlock>().FirstOrDefault()?.Text;
         var succeeded = callResult.IsError != true;

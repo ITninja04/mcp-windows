@@ -430,7 +430,7 @@ The target window is activated before each mouse step, so a batch cannot fail wi
 `polyline` presses once at the first point, traces every vertex, and releases at the last - a single continuous stroke. This is better than N segment-drags, which lift the pen at every vertex, and costs one round-trip instead of N.
 
 ```json
-[{"action":"mouse","mouseAction":"click","name":"Pencil","x":120,"y":90},
+[{"action":"click","name":"Pencil"},
  {"action":"polyline","points":[[300,200],[500,200],[500,400],[300,200]]},
  {"action":"mouse","mouseAction":"drag","x":600,"y":200,"endX":700,"endY":400}]
 ```

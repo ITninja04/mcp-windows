@@ -11,7 +11,18 @@ public sealed class MouseInputService
 {
     private readonly ModifierKeyManager _modifierKeyManager = new();
     /// <inheritdoc />
-    public Task<MouseControlResult> MoveAsync(int x, int y, CancellationToken cancellationToken = default)
+    public Task<MouseControlResult> MoveAsync(int x, int y, CancellationToken cancellationToken = default) =>
+        MoveCoreAsync(x, y, extraFlags: 0, cancellationToken);
+
+    /// <summary>
+    /// Moves the cursor as part of a held-button stroke. Sets <c>MOUSEEVENTF_MOVE_NOCOALESCE</c> so Windows
+    /// delivers this vertex to the target even when the target thread is busy; a plain move may be coalesced
+    /// with the next one, which would cut across the corner between them.
+    /// </summary>
+    private Task<MouseControlResult> MoveForStrokeAsync(int x, int y, CancellationToken cancellationToken) =>
+        MoveCoreAsync(x, y, NativeConstants.MOUSEEVENTF_MOVE_NOCOALESCE, cancellationToken);
+
+    private static Task<MouseControlResult> MoveCoreAsync(int x, int y, uint extraFlags, CancellationToken cancellationToken)
     {
         // Validate coordinates against virtual screen bounds
         var (isValid, screenBounds) = CoordinateNormalizer.ValidateCoordinates(x, y);
@@ -38,7 +49,7 @@ public sealed class MouseInputService
                     Dx = normalizedX,
                     Dy = normalizedY,
                     MouseData = 0,
-                    DwFlags = NativeConstants.MOUSEEVENTF_MOVE | NativeConstants.MOUSEEVENTF_ABSOLUTE | NativeConstants.MOUSEEVENTF_VIRTUALDESK,
+                    DwFlags = NativeConstants.MOUSEEVENTF_MOVE | NativeConstants.MOUSEEVENTF_ABSOLUTE | NativeConstants.MOUSEEVENTF_VIRTUALDESK | extraFlags,
                     Time = 0,
                     DwExtraInfo = 0,
                 },
@@ -597,7 +608,7 @@ public sealed class MouseInputService
 
     /// <inheritdoc />
     public Task<MouseControlResult> DragAsync(int startX, int startY, int endX, int endY, MouseButton button = MouseButton.Left, CancellationToken cancellationToken = default) =>
-        StrokeAsync([new Coordinates(startX, startY), new Coordinates(endX, endY)], button, ModifierKey.None, pointDelayMs: 0, cancellationToken);
+        StrokeAsync([new Coordinates(startX, startY), new Coordinates(endX, endY)], button, ModifierKey.None, cancellationToken);
 
     /// <summary>
     /// Presses a mouse button at the first point, moves through every remaining point, and releases at the last -
@@ -606,19 +617,17 @@ public sealed class MouseInputService
     /// <param name="points">Absolute screen coordinates to trace, in order. At least two are required.</param>
     /// <param name="button">The mouse button to hold down for the duration of the stroke.</param>
     /// <param name="modifiers">Modifier keys to hold while stroking.</param>
-    /// <param name="pointDelayMs">Delay between successive points. A few milliseconds keeps Windows from coalescing
-    /// back-to-back absolute moves, which would drop vertices in drawing applications. Use 0 for a plain two-point drag.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>A result whose final position is the last point, with target window info sampled at the first point.</returns>
     /// <remarks>
     /// <see cref="DragAsync"/> is the two-point case of this method, so drag and stroke can never diverge.
-    /// The button is always released in a <c>finally</c> block, even when a move fails partway through.
+    /// Every move after the press is sent with <c>MOUSEEVENTF_MOVE_NOCOALESCE</c> so no vertex is dropped when the
+    /// target thread is busy. The button is always released in a <c>finally</c> block, even when a move fails partway through.
     /// </remarks>
     public async Task<MouseControlResult> StrokeAsync(
         IReadOnlyList<Coordinates> points,
         MouseButton button = MouseButton.Left,
         ModifierKey modifiers = ModifierKey.None,
-        int pointDelayMs = 0,
         CancellationToken cancellationToken = default)
     {
         if (points is null || points.Count < 2)
@@ -714,12 +723,7 @@ public sealed class MouseInputService
                 // Step 3: Trace through the remaining points with the button held
                 for (var i = 1; i < points.Count; i++)
                 {
-                    if (pointDelayMs > 0)
-                    {
-                        await Task.Delay(pointDelayMs, cancellationToken);
-                    }
-
-                    var moveResult = await MoveAsync(points[i].X, points[i].Y, cancellationToken);
+                    var moveResult = await MoveForStrokeAsync(points[i].X, points[i].Y, cancellationToken);
                     if (!moveResult.Success)
                     {
                         // Even if a move fails, the button is released in finally

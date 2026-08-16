@@ -70,7 +70,7 @@ internal static class HelpText
                      --automation-id|--class-name ...] [--found-index <n>] [--include-children]
                      [--sort-by-prominence] [--in-region x,y,w,h] [--near-element <id>]
                      [--visible-only] [--content-view-only] [--timeout-ms <n>]
-        ui click    --window <h> [selectors|--element-id <id>] [--found-index <n>] [--with-snapshot]
+        ui click    --window <h> [selectors|--element-id <id>] [--found-index <n>] [--double-click] [--with-snapshot]
         ui type     --window <h> --text <s> [selectors|--element-id <id>] [--clear-first] [--with-snapshot]
         ui select   --window <h> --value <s> [selectors] [--with-snapshot]
         ui read     --window <h> [selectors|--element-id <id>] [--include-children] [--language <c>] [--format raw|article]

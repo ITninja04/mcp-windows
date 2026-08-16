@@ -613,13 +613,21 @@ public sealed partial class UIAutomationService
         return element.TryInvoke();
     }
 
-    private void TryActivateWindowForElement(UIA.IUIAutomationElement element, nint? windowHandle)
+    private void TryActivateWindowForElement(UIA.IUIAutomationElement element, nint? windowHandle) =>
+        _ = ActivateWindowForElement(element, windowHandle);
+
+    /// <summary>
+    /// Activates the window that hosts <paramref name="element"/> and reports whether it is confirmed to be the
+    /// foreground window afterwards. Semantic actions can ignore the result; anything that injects physical input
+    /// must not, because a denied activation sends that input to whichever window is in front instead.
+    /// </summary>
+    private bool ActivateWindowForElement(UIA.IUIAutomationElement element, nint? windowHandle)
     {
         try
         {
             if (_windowActivator == null)
             {
-                return;
+                return false;
             }
 
             var handle = windowHandle;
@@ -648,20 +656,46 @@ public sealed partial class UIAutomationService
                 }
             }
 
-            if (handle.HasValue && handle.Value != IntPtr.Zero)
+            if (!handle.HasValue || handle.Value == IntPtr.Zero)
             {
-                _windowActivator.ActivateWindowAsync(handle.Value, cancellationToken: CancellationToken.None)
-                    .GetAwaiter()
-                    .GetResult();
-                _ = DeterministicWait.Until(
-                    () => _windowActivator.IsForegroundWindow(handle.Value),
-                    TimeSpan.FromMilliseconds(500),
-                    ActionVerificationPollInterval);
+                return false;
             }
+
+            _windowActivator.ActivateWindowAsync(handle.Value, cancellationToken: CancellationToken.None)
+                .GetAwaiter()
+                .GetResult();
+            return DeterministicWait.Until(
+                () => _windowActivator.IsForegroundWindow(handle.Value),
+                TimeSpan.FromMilliseconds(500),
+                ActionVerificationPollInterval);
         }
         catch
         {
-            // Best effort - continue even if activation fails
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Click point for actions that are always physical: asks UIA for a visible clickable point first (so a
+    /// partially covered element is not hit through the overlay) and only falls back to the bounding-rect center.
+    /// </summary>
+    private static Point? GetPhysicalClickPoint(UIA.IUIAutomationElement element)
+    {
+        try
+        {
+            if (element.TryGetClickablePoint(out var clickableX, out var clickableY))
+            {
+                return new Point(clickableX, clickableY);
+            }
+
+            var rect = element.CurrentBoundingRectangle;
+            return rect.right > rect.left && rect.bottom > rect.top
+                ? new Point(rect.left + (rect.right - rect.left) / 2, rect.top + (rect.bottom - rect.top) / 2)
+                : null;
+        }
+        catch
+        {
+            return null;
         }
     }
 
@@ -847,10 +881,21 @@ public sealed partial class UIAutomationService
                     "double_click",
                     UIAutomationErrorType.ElementNotFound,
                     $"Element with ID '{elementId}' could not be resolved.",
-                    CreateDiagnostics(stopwatch)), Element: (UIA.IUIAutomationElement?)null, Point: (Point?)null);
+                    CreateDiagnostics(stopwatch)), Element: (UIA.IUIAutomationElement?)null, Root: (UIA.IUIAutomationElement?)null, Point: (Point?)null, Initial: default(ElementActionState));
             }
 
-            TryActivateWindowForElement(element, activationHandle);
+            // A double-click is always physical input, so a window that could not be brought to the foreground
+            // must fail here rather than receive nothing while another window receives two clicks.
+            if (!ActivateWindowForElement(element, activationHandle))
+            {
+                return (Failure: UIAutomationResult.CreateFailure(
+                    "double_click",
+                    UIAutomationErrorType.WindowNotFound,
+                    "The element's window could not be activated and confirmed as the foreground window, so the double-click was not sent. " +
+                    "Activate the window first with window_management(action='activate') and retry.",
+                    CreateDiagnostics(stopwatch)), Element: (UIA.IUIAutomationElement?)null, Root: (UIA.IUIAutomationElement?)null, Point: (Point?)null, Initial: default(ElementActionState));
+            }
+
             if (!element.IsEnabled())
             {
                 return (Failure: UIAutomationResult.CreateFailure(
@@ -858,10 +903,18 @@ public sealed partial class UIAutomationService
                     UIAutomationErrorType.InvalidParameter,
                     $"Element with ID '{elementId}' is disabled and cannot be double-clicked. " +
                     "Wait for it to become enabled (e.g., after filling required fields) or target a different element.",
-                    CreateDiagnostics(stopwatch)), Element: (UIA.IUIAutomationElement?)null, Point: (Point?)null);
+                    CreateDiagnostics(stopwatch)), Element: (UIA.IUIAutomationElement?)null, Root: (UIA.IUIAutomationElement?)null, Point: (Point?)null, Initial: default(ElementActionState));
             }
 
-            return (Failure: (UIAutomationResult?)null, Element: element, Point: GetClickablePointForClick(element) ?? fallbackClickPoint);
+            var root = GetRootElementForScroll(element);
+            var initial = new ElementActionState(
+                element.GetControlTypeId(),
+                GetToggleStateValue(element),
+                GetSelectionState(element),
+                GetElementState(element),
+                GetObservableFingerprint(root));
+
+            return (Failure: (UIAutomationResult?)null, Element: element, Root: root, Point: GetPhysicalClickPoint(element) ?? fallbackClickPoint, Initial: initial);
         }, cancellationToken);
 
         if (prepared.Failure != null)
@@ -891,6 +944,19 @@ public sealed partial class UIAutomationService
                 CreateDiagnostics(stopwatch));
         }
 
+        // SendInput only queues the events. Wait until the target has visibly processed them so the next batch
+        // step or a trailing snapshot does not observe the pre-double-click UI. A stale element is an observation
+        // too: a double-click commonly opens or closes the thing it targeted.
+        var clicked = prepared.Element!;
+        var before = prepared.Initial;
+        var outcome = await WaitForElementConditionAsync(
+            clicked,
+            () =>
+                HasObservableStateChanged(clicked, before.ToggleState, before.IsSelected) ||
+                GetElementState(clicked) != before.ElementState ||
+                GetObservableFingerprint(prepared.Root!) != before.RootFingerprint,
+            cancellationToken);
+
         return await _staThread.ExecuteAsync(() =>
         {
             // A double-click commonly opens/closes the element's window, so a stale element here is success.
@@ -904,12 +970,23 @@ public sealed partial class UIAutomationService
                 info = null;
             }
 
-            return info is null
-                ? UIAutomationResult.CreateSuccessWithHint(
+            if (info is null)
+            {
+                return UIAutomationResult.CreateSuccessWithHint(
                     "double_click",
                     "Double-click succeeded. Element closed or changed its parent window or dialog.",
-                    CreateDiagnostics(stopwatch))
-                : UIAutomationResult.CreateSuccessCompact("double_click", [info], CreateDiagnostics(stopwatch));
+                    CreateDiagnostics(stopwatch));
+            }
+
+            // Unlike a single click, the effect of a double-click frequently lands in a different top-level
+            // window (an opened file or dialog), so an unchanged source tree is a hint, not a failure.
+            return outcome.Observed
+                ? UIAutomationResult.CreateSuccessCompact("double_click", [info], CreateDiagnostics(stopwatch))
+                : UIAutomationResult.CreateSuccessWithHint(
+                    "double_click",
+                    "Double-click was delivered, but no change was observed in this window within the verification window. " +
+                    "If it should have opened something, look for a new window with window_management(action='list').",
+                    CreateDiagnostics(stopwatch));
         }, cancellationToken);
     }
 

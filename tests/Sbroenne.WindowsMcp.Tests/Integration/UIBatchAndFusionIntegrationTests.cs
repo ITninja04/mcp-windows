@@ -221,9 +221,10 @@ public sealed class UIBatchAndFusionIntegrationTests
         Assert.True(batch.Success, $"Double-click batch failed: {ExtractText(result)}");
         Assert.Equal("double-clicked", batch.Steps[0].Summary);
 
-        await Task.Delay(200);
+        // The tool waits for an observable change before returning, which the first mouse-up already causes;
+        // poll briefly for the second so the assertion does not race the message pump.
         Assert.True(
-            _fixture.Form!.SubmitMouseInputCount >= before + 2,
+            await TestWait.UntilAsync(() => _fixture.Form!.SubmitMouseInputCount >= before + 2),
             $"Expected at least 2 physical mouse-ups, saw {_fixture.Form!.SubmitMouseInputCount - before}.");
     }
 
@@ -251,9 +252,10 @@ public sealed class UIBatchAndFusionIntegrationTests
         var text = ExtractText(result);
         Assert.True(JsonDocument.Parse(text).RootElement.GetProperty("success").GetBoolean(), $"Double-click failed: {text}");
 
-        await Task.Delay(200);
+        // The tool waits for an observable change before returning, which the first mouse-up already causes;
+        // poll briefly for the second so the assertion does not race the message pump.
         Assert.True(
-            _fixture.Form!.SubmitMouseInputCount >= before + 2,
+            await TestWait.UntilAsync(() => _fixture.Form!.SubmitMouseInputCount >= before + 2),
             $"Expected at least 2 physical mouse-ups, saw {_fixture.Form!.SubmitMouseInputCount - before}.");
     }
 
