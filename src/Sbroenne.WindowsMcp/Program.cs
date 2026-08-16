@@ -2,8 +2,7 @@ using System.Reflection;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using Sbroenne.WindowsMcp.Prompts;
-using Sbroenne.WindowsMcp.Resources;
+using Sbroenne.WindowsMcp.Hosting;
 using Sbroenne.WindowsMcp.Tools;
 
 // Single source of truth for the server version: read it from the assembly so it always
@@ -21,7 +20,7 @@ if (plusIndex >= 0)
 }
 
 // Handle --version/-v flag for startup testing
-if (args.Length > 0 && (args[0] == "--version" || args[0] == "-v"))
+if (args.Length > 0 && (args[0] == "--version" || args[0] == "-v" || (ServerOptions.TryParse(args, out var versionOptions, out _) && versionOptions.ShowVersion)))
 {
     Console.WriteLine($"sbroenne.windows-mcp version {serverVersion}");
     Console.WriteLine("Testing service initialization...");
@@ -45,6 +44,26 @@ if (args.Length > 0 && (args[0] == "--version" || args[0] == "-v"))
     return 0;
 }
 
+if (!ServerOptions.TryParse(args, out var serverOptions, out var optionsError))
+{
+    Console.Error.WriteLine(optionsError);
+    Console.Error.WriteLine();
+    Console.Error.WriteLine(ServerOptions.Usage);
+    return 2;
+}
+
+if (serverOptions.ShowHelp)
+{
+    Console.WriteLine(ServerOptions.Usage);
+    return 0;
+}
+
+if (serverOptions.Transport == ServerTransport.Http)
+{
+    // Ctrl+C is handled by the host's console lifetime so hosted work is stopped in order.
+    return await HttpTransportHost.RunAsync(serverOptions, serverVersion, CancellationToken.None);
+}
+
 var builder = Host.CreateApplicationBuilder(args);
 
 // Configure logging to stderr for MCP protocol compliance (stdout is reserved for MCP)
@@ -59,21 +78,10 @@ builder.Logging.SetMinimumLevel(LogLevel.Warning);
 // NOTE: Services are NOT registered via DI - tools use WindowsToolsBase lazy singletons instead.
 // This simplifies the architecture and matches the mcp-server-excel pattern.
 
-// Configure MCP server with stdio transport
+// Configure MCP server with stdio transport (tools, prompts, and resources are shared with the HTTP host)
 builder.Services
-    .AddMcpServer(options =>
-    {
-        options.ServerInfo = new()
-        {
-            Name = "sbroenne.windows-mcp",
-            Version = serverVersion,
-        };
-        options.ServerInstructions = WindowsAutomationGuidance.ServerInstructions;
-    })
-    .WithStdioServerTransport()
-    .WithToolsFromAssembly()  // Discovers static tools marked with [McpServerToolType]
-    .WithPrompts<WindowsAutomationPrompts>()
-    .WithResources<SystemResources>();
+    .AddWindowsMcpServer(serverVersion)
+    .WithStdioServerTransport();
 
 var host = builder.Build();
 

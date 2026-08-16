@@ -779,6 +779,27 @@ The server handles common Windows security scenarios:
 | `MCP_WINDOWS_SCREENSHOT_TIMEOUT_MS` | `5000` | Screenshot operation timeout |
 | `MCP_WINDOWS_SCREENSHOT_MAX_PIXELS` | `33177600` | Maximum capture size (default 8K) |
 
+### Transports
+
+The server speaks MCP over stdio by default, which is what VS Code, Claude Code, and the plugin use. It can also serve Streamable HTTP for clients on the same machine or, behind a tunnel or tailnet, on another one:
+
+```powershell
+Sbroenne.WindowsMcp.exe                                # stdio (default)
+Sbroenne.WindowsMcp.exe --transport http               # http://127.0.0.1:8765/mcp
+Sbroenne.WindowsMcp.exe --transport http --port 9000 --path /windows
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--transport <stdio\|http>` | `stdio` | Transport to use |
+| `--host <address>` | `127.0.0.1` | HTTP bind address, an IP literal or `localhost` (host names are not resolved) |
+| `--port <number>` | `8765` | HTTP port, `0` picks a free port and prints it |
+| `--path <route>` | `/mcp` | Route for the MCP endpoint |
+
+The HTTP host binds only the address you ask for and ignores `ASPNETCORE_URLS`, `appsettings.json`, and hosting-startup assemblies, so nothing outside the command line can add a listener. It refuses requests whose `Host` header is not the bound address and any request that carries a foreign `Origin`, which keeps a web page from driving the desktop through DNS rebinding. `GET /healthz` on the same bind reports version and uptime. Binding a non-loopback address prints a warning: anyone who can reach that port can control the desktop, so put a tailnet, VPN, or authenticated reverse proxy in front of it.
+
+Add an HTTP server to Claude Code with `claude mcp add --transport http windows http://127.0.0.1:8765/mcp`.
+
 ---
 
 ## Known Limitations
@@ -814,3 +835,4 @@ When building automation workflows, **plan for elevation boundaries**:
 - **UIPI**: Windows User Interface Privilege Isolation blocks input to elevated windows from non-elevated processes
 - **Secure Desktop**: Input cannot be sent during UAC prompts or lock screen
 - **Input Simulation**: The server uses `SendInput` which is the standard Windows API for simulating input
+- **HTTP transport**: Loopback only unless `--host` says otherwise; `Host` and `Origin` are validated on every request. There is no authentication in the server itself, so a non-loopback bind must sit behind something that authenticates (see Transports)

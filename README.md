@@ -68,6 +68,8 @@ On first use, the plugin downloads the current standalone release into `plugin\b
 { "servers": { "windows": { "command": "path\\to\\Sbroenne.WindowsMcp.exe" } } }
 ```
 
+**HTTP** — Run `Sbroenne.WindowsMcp.exe --transport http` to serve Streamable HTTP on `http://127.0.0.1:8765/mcp` (loopback only by default), then `claude mcp add --transport http windows http://127.0.0.1:8765/mcp`. See [Transports](FEATURES.md#transports).
+
 ## Tools
 
 | Tool | Purpose |

@@ -42,9 +42,13 @@
 
   <ItemGroup>
     <PackageReference Include="ModelContextProtocol" />
-    <PackageReference Include="Microsoft.Extensions.Hosting" />
-    <PackageReference Include="Microsoft.Extensions.Logging" />
+    <PackageReference Include="ModelContextProtocol.AspNetCore" />
     <PackageReference Include="Interop.UIAutomationClient" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- ASP.NET Core hosts the optional Streamable HTTP transport (transport=http). -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
 
   <ItemGroup>
