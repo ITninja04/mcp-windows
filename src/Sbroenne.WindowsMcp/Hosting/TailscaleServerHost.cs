@@ -94,9 +94,10 @@ internal static class TailscaleServerHost
             builder.Services.AddSingleton<ITailscaleCli>(cli);
             builder.Services.AddSingleton(options);
             builder.Services.AddSingleton(TimeProvider.System);
-            builder.Services.AddSingleton(auditSink);
 
-            var auditLoggerFactory = LoggerFactory.Create(logging =>
+            // The audit filter is registered before the app is built, so it gets its own logger factory rather than
+            // the app's. The factory is disposed with the try scope, after the app has stopped and no request can log.
+            using var auditLoggerFactory = LoggerFactory.Create(logging =>
             {
                 logging.AddConsole(consoleOptions => consoleOptions.LogToStandardErrorThreshold = LogLevel.Trace);
                 logging.SetMinimumLevel(LogLevel.Information);
