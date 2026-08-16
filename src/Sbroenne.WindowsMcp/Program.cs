@@ -58,6 +58,17 @@ if (serverOptions.ShowHelp)
     return 0;
 }
 
+if (serverOptions.CheckOnly)
+{
+    return await TailscaleServerHost.CheckAsync(serverOptions, CancellationToken.None);
+}
+
+if (serverOptions.Tailscale)
+{
+    // Ctrl+C is handled by the host's console lifetime so the serve child is torn down in order.
+    return await TailscaleServerHost.RunAsync(serverOptions, serverVersion, CancellationToken.None);
+}
+
 if (serverOptions.Transport == ServerTransport.Http)
 {
     // Ctrl+C is handled by the host's console lifetime so hosted work is stopped in order.
