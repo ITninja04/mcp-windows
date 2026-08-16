@@ -21,6 +21,9 @@ public sealed record ServerOptions
     /// <summary>Default route the MCP endpoint is mapped at.</summary>
     public const string DefaultHttpPath = "/mcp";
 
+    /// <summary>Default tailnet-facing HTTPS port for Tailscale Serve.</summary>
+    public const int DefaultServePort = 443;
+
     /// <summary>Which transport to run.</summary>
     public ServerTransport Transport { get; init; } = ServerTransport.Stdio;
 
@@ -41,6 +44,33 @@ public sealed record ServerOptions
 
     /// <summary>True when the caller asked for the version and service self-check.</summary>
     public bool ShowVersion { get; init; }
+
+    /// <summary>
+    /// True when the server runs behind Tailscale Serve: it binds loopback, starts and supervises a foreground
+    /// <c>tailscale serve</c> child, and enforces tailnet identity on every request.
+    /// </summary>
+    public bool Tailscale { get; init; }
+
+    /// <summary>The tailnet-facing HTTPS port Serve listens on (default 443).</summary>
+    public int ServePort { get; init; } = DefaultServePort;
+
+    /// <summary>Tailnet logins allowed to reach the server. Required in Tailscale mode; empty otherwise.</summary>
+    public IReadOnlyList<string> AllowedLogins { get; init; } = [];
+
+    /// <summary>
+    /// When true (the default), a request's identity header is cross-checked against <c>tailscale whois</c> of the
+    /// forwarded address. Turning it off reduces authentication to a header the peer sends and is strongly discouraged.
+    /// </summary>
+    public bool VerifyIdentity { get; init; } = true;
+
+    /// <summary>Optional path to append a JSON-lines audit record per tool call, in addition to the log.</summary>
+    public string? AuditFilePath { get; init; }
+
+    /// <summary>Optional override for the Tailscale executable path. Resolved from a trusted location, never from PATH.</summary>
+    public string? TailscaleExecutable { get; init; }
+
+    /// <summary>True when the caller asked to run preflight checks and exit without serving.</summary>
+    public bool CheckOnly { get; init; }
 
     /// <summary>
     /// True when the configured host only accepts connections from this machine.
@@ -73,6 +103,13 @@ public sealed record ServerOptions
                                      port control this desktop. Prefer a tailnet or a tunnel over --host.
           --port <number>            HTTP port, 0 = pick a free port (default: 8765).
           --path <route>             HTTP route for the MCP endpoint (default: /mcp).
+          --tailscale                Serve behind Tailscale Serve, tailnet-only, with identity checks.
+          --allow <login>            Tailnet login allowed to connect (repeatable; required with --tailscale).
+          --serve-port <number>      Tailnet-facing HTTPS port for Serve (default: 443).
+          --no-verify-identity       Skip the whois cross-check (reduces auth to a header; discouraged).
+          --audit-file <path>        Append a JSON-lines audit record per tool call.
+          --tailscale-exe <path>     Path to tailscale.exe (default: the Program Files install).
+          --tailscale-check          Run Tailscale preflight checks and exit.
           --version, -v              Print the version and check service initialization.
           --help, -h                 Show this text.
 
@@ -103,11 +140,27 @@ public sealed record ServerOptions
         var path = DefaultHttpPath;
         var showHelp = false;
         var httpOptionSeen = false;
+        var hostSpecified = false;
+        var tailscale = false;
+        var servePort = DefaultServePort;
+        var verifyIdentity = true;
+        var checkOnly = false;
+        string? auditFilePath = null;
+        string? tailscaleExecutable = null;
+        var allowedLogins = new List<string>();
 
         for (var i = 0; i < args.Length; i++)
         {
             var arg = args[i];
             var (name, inlineValue) = SplitInlineValue(arg);
+
+            // Funnel exposes a service to the public internet. This server controls the desktop and must never
+            // be reachable that way, so any mention of funnel anywhere on the command line is refused outright.
+            if (arg.Contains("funnel", StringComparison.OrdinalIgnoreCase))
+            {
+                error = "funnel is not supported: this server must never be exposed to the public internet.";
+                return false;
+            }
 
             switch (name.ToLowerInvariant())
             {
@@ -142,6 +195,7 @@ public sealed record ServerOptions
                     }
 
                     httpOptionSeen = true;
+                    hostSpecified = true;
                     break;
 
                 case "--port":
@@ -168,6 +222,61 @@ public sealed record ServerOptions
                     httpOptionSeen = true;
                     break;
 
+                case "--tailscale":
+                    tailscale = true;
+                    break;
+
+                case "--serve-port":
+                    if (!TryTakeValue(args, ref i, inlineValue, name, out var servePortValue, out error))
+                    {
+                        return false;
+                    }
+
+                    if (!int.TryParse(servePortValue, NumberStyles.None, CultureInfo.InvariantCulture, out servePort) || servePort is < 1 or > ushort.MaxValue)
+                    {
+                        error = $"Invalid serve port '{servePortValue}'. Use a number from 1 to 65535.";
+                        return false;
+                    }
+
+                    break;
+
+                case "--allow":
+                    if (!TryTakeValue(args, ref i, inlineValue, name, out var login, out error))
+                    {
+                        return false;
+                    }
+
+                    allowedLogins.Add(login);
+                    break;
+
+                case "--verify-identity":
+                    verifyIdentity = true;
+                    break;
+
+                case "--no-verify-identity":
+                    verifyIdentity = false;
+                    break;
+
+                case "--audit-file":
+                    if (!TryTakeValue(args, ref i, inlineValue, name, out auditFilePath, out error))
+                    {
+                        return false;
+                    }
+
+                    break;
+
+                case "--tailscale-exe":
+                    if (!TryTakeValue(args, ref i, inlineValue, name, out tailscaleExecutable, out error))
+                    {
+                        return false;
+                    }
+
+                    break;
+
+                case "--tailscale-check":
+                    checkOnly = true;
+                    break;
+
                 default:
                     error = $"Unknown option '{arg}'.";
                     return false;
@@ -178,6 +287,33 @@ public sealed record ServerOptions
         {
             options = new ServerOptions { ShowHelp = true };
             return true;
+        }
+
+        var tailscaleOptionSeen = tailscale || servePort != DefaultServePort || allowedLogins.Count > 0
+            || auditFilePath is not null || tailscaleExecutable is not null || checkOnly || !verifyIdentity;
+
+        if (tailscale)
+        {
+            // Tailscale mode is loopback-only by construction: Serve terminates TLS and forwards to us on loopback,
+            // so binding anything else would open a second, unauthenticated door.
+            if (hostSpecified)
+            {
+                error = "--host cannot be combined with --tailscale; Tailscale mode always binds loopback.";
+                return false;
+            }
+
+            if (allowedLogins.Count == 0)
+            {
+                error = "--tailscale requires at least one --allow <login> so only named tailnet users can control this desktop.";
+                return false;
+            }
+
+            transport = ServerTransport.Http;
+        }
+        else if (tailscaleOptionSeen)
+        {
+            error = "--serve-port, --allow, --verify-identity, --audit-file, --tailscale-exe, and --tailscale-check require --tailscale.";
+            return false;
         }
 
         if (transport == ServerTransport.Stdio && httpOptionSeen)
@@ -214,6 +350,13 @@ public sealed record ServerOptions
             Host = host,
             Port = port,
             Path = path,
+            Tailscale = tailscale,
+            ServePort = servePort,
+            AllowedLogins = allowedLogins,
+            VerifyIdentity = verifyIdentity,
+            AuditFilePath = auditFilePath,
+            TailscaleExecutable = tailscaleExecutable,
+            CheckOnly = checkOnly,
         };
         return true;
     }

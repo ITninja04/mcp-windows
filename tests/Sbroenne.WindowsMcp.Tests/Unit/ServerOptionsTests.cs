@@ -41,6 +41,24 @@ public sealed class ServerOptionsTests
     }
 
     [Fact]
+    public void TryParse_Tailscale_ImpliesLoopbackHttpAndKeepsAllowList()
+    {
+        var parsed = ServerOptions.TryParse(
+            ["--tailscale", "--allow", "ozzie@github", "--allow", "someone@example.com", "--serve-port", "8443", "--no-verify-identity"],
+            out var options,
+            out var error);
+
+        Assert.True(parsed);
+        Assert.Null(error);
+        Assert.True(options.Tailscale);
+        Assert.Equal(ServerTransport.Http, options.Transport);
+        Assert.True(options.BindsLoopbackOnly);
+        Assert.Equal(8443, options.ServePort);
+        Assert.False(options.VerifyIdentity);
+        Assert.Equal(["ozzie@github", "someone@example.com"], options.AllowedLogins);
+    }
+
+    [Fact]
     public void TryParse_Version_IsAcceptedAnywhere()
     {
         var parsed = ServerOptions.TryParse(["--transport", "http", "--version"], out var options, out var error);
@@ -94,6 +112,14 @@ public sealed class ServerOptionsTests
     [InlineData("--transport http --path /mcp/", "Invalid path")]
     [InlineData("--transport http --host localhost --port 0", "single address")]
     [InlineData("--frobnicate", "Unknown option")]
+    [InlineData("--tailscale", "requires at least one --allow")]
+    [InlineData("--tailscale --allow me@github --host 127.0.0.1", "--host cannot be combined")]
+    [InlineData("--serve-port 8443", "require --tailscale")]
+    [InlineData("--allow me@github", "require --tailscale")]
+    [InlineData("--transport http --allow me@github", "require --tailscale")]
+    [InlineData("--tailscale --allow me@github --funnel", "funnel is not supported")]
+    [InlineData("--funnel", "funnel is not supported")]
+    [InlineData("--tailscale --allow me@github --serve-port 0", "Invalid serve port")]
     public void TryParse_InvalidArguments_FailWithReason(string commandLine, string expectedFragment)
     {
         ArgumentNullException.ThrowIfNull(commandLine);
