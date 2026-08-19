@@ -2,6 +2,7 @@ using System.Text.Json;
 using ModelContextProtocol.Protocol;
 using Sbroenne.WindowsMcp.Automation.Tools;
 using Sbroenne.WindowsMcp.Models;
+using Sbroenne.WindowsMcp.Native;
 using Sbroenne.WindowsMcp.Tests.Integration.TestHarness;
 
 namespace Sbroenne.WindowsMcp.Tests.Integration;
@@ -221,8 +222,9 @@ public sealed class UIBatchAndFusionIntegrationTests
         Assert.True(batch.Success, $"Double-click batch failed: {ExtractText(result)}");
         Assert.Equal("double-clicked", batch.Steps[0].Summary);
 
-        // The tool waits for an observable change before returning, which the first mouse-up already causes;
-        // poll briefly for the second so the assertion does not race the message pump.
+        // The tool holds an injected-input barrier until all four events have cleared system input
+        // processing, so the second mouse-up is guaranteed to be queued to the harness before the tool
+        // returns. The brief wait covers only the harness UI thread's own dispatch latency.
         Assert.True(
             await TestWait.UntilAsync(() => _fixture.Form!.SubmitMouseInputCount >= before + 2),
             $"Expected at least 2 physical mouse-ups, saw {_fixture.Form!.SubmitMouseInputCount - before}.");
@@ -252,11 +254,84 @@ public sealed class UIBatchAndFusionIntegrationTests
         var text = ExtractText(result);
         Assert.True(JsonDocument.Parse(text).RootElement.GetProperty("success").GetBoolean(), $"Double-click failed: {text}");
 
-        // The tool waits for an observable change before returning, which the first mouse-up already causes;
-        // poll briefly for the second so the assertion does not race the message pump.
+        // The tool holds an injected-input barrier until all four events have cleared system input
+        // processing, so the second mouse-up is guaranteed to be queued to the harness before the tool
+        // returns. The brief wait covers only the harness UI thread's own dispatch latency.
         Assert.True(
             await TestWait.UntilAsync(() => _fixture.Form!.SubmitMouseInputCount >= before + 2),
             $"Expected at least 2 physical mouse-ups, saw {_fixture.Form!.SubmitMouseInputCount - before}.");
+    }
+
+    [Fact]
+    [Trait("Category", "RequiresDesktop")]
+    public async Task UiClick_DoubleClick_RejectsHandleFromAnotherWindow()
+    {
+        var before = _fixture.Form!.SubmitMouseInputCount;
+
+        // Resolve a real element id from the harness window first.
+        var findSteps = JsonSerializer.Serialize(new object[]
+        {
+            new { action = "find", name = "Submit", controlType = "Button" },
+        });
+        var findResult = await UIBatchTool.ExecuteAsync(
+            _windowHandle, findSteps, stopOnError: true, withSnapshot: false, includeDiagnostics: false, CancellationToken.None);
+        var find = ParseBatch(findResult);
+        Assert.True(find.Success, $"Find failed: {ExtractText(findResult)}");
+        var elementId = find.Steps[0].ElementId;
+        Assert.NotNull(elementId);
+
+        // Open an unrelated top-level window whose handle does not own that element.
+        using var decoyReady = new ManualResetEventSlim();
+        using var decoyClosed = new ManualResetEventSlim();
+        Form? decoy = null;
+        nint decoyHwnd = 0;
+        var decoyThread = new Thread(() =>
+        {
+            decoy = new Form { Text = "Decoy window", Width = 220, Height = 120 };
+            decoy.Shown += (_, _) =>
+            {
+                decoyHwnd = decoy.Handle;
+                decoyReady.Set();
+            };
+            decoy.FormClosed += (_, _) => decoyClosed.Set();
+            Application.Run(decoy);
+        })
+        {
+            IsBackground = true,
+        };
+        decoyThread.SetApartmentState(ApartmentState.STA);
+        decoyThread.Start();
+        Assert.True(decoyReady.Wait(TimeSpan.FromSeconds(5)), "Decoy window did not open.");
+
+        try
+        {
+            var result = await UIClickTool.ExecuteAsync(
+                WindowHandleParser.Format(decoyHwnd),
+                name: null,
+                nameContains: null,
+                namePattern: null,
+                controlType: null,
+                automationId: null,
+                className: null,
+                elementId: elementId,
+                foundIndex: 1,
+                withSnapshot: false,
+                includeDiagnostics: false,
+                doubleClick: true,
+                CancellationToken.None);
+
+            // The mismatch must be rejected before any activation or input: no window may be
+            // brought forward and no click may land anywhere.
+            var text = ExtractText(result);
+            Assert.False(JsonDocument.Parse(text).RootElement.GetProperty("success").GetBoolean(), $"Mismatched handle was accepted: {text}");
+            Assert.Contains("does not own", text, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(before, _fixture.Form!.SubmitMouseInputCount);
+        }
+        finally
+        {
+            decoy?.Invoke(() => decoy.Close());
+            decoyClosed.Wait(TimeSpan.FromSeconds(5));
+        }
     }
 
     [Fact]

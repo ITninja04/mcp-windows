@@ -9,6 +9,17 @@ namespace Sbroenne.WindowsMcp.Input;
 /// </summary>
 public sealed class MouseInputService
 {
+    /// <summary>
+    /// How long to wait for the injected-input hook to come up before sending without it.
+    /// </summary>
+    private static readonly TimeSpan BarrierInstallTimeout = TimeSpan.FromSeconds(1);
+
+    /// <summary>
+    /// How long to wait for a marked input sequence to clear system input processing. Generous
+    /// relative to the microseconds this takes in practice; only a wedged input queue reaches it.
+    /// </summary>
+    private static readonly TimeSpan BarrierCompletionTimeout = TimeSpan.FromSeconds(2);
+
     private readonly ModifierKeyManager _modifierKeyManager = new();
     /// <inheritdoc />
     public Task<MouseControlResult> MoveAsync(int x, int y, CancellationToken cancellationToken = default) =>
@@ -270,7 +281,16 @@ public sealed class MouseInputService
     }
 
     /// <inheritdoc />
-    public Task<MouseControlResult> DoubleClickAsync(int? x, int? y, ModifierKey modifiers = ModifierKey.None, CancellationToken cancellationToken = default)
+    /// <remarks>
+    /// The four events are tagged with an <see cref="InjectedInputBarrier"/> marker, and after a
+    /// successful SendInput the method waits (bounded) until the second button-up has been dequeued
+    /// by system input processing. Without that barrier the method can return between the first
+    /// mouse-up and the second click, and any input the caller injects next interleaves ahead of
+    /// the tail of the double-click. On barrier timeout the method still returns success: the
+    /// events were injected, and stalling the caller forever on a hook that another process may be
+    /// delaying would be worse than returning without the ordering insurance.
+    /// </remarks>
+    public async Task<MouseControlResult> DoubleClickAsync(int? x, int? y, ModifierKey modifiers = ModifierKey.None, CancellationToken cancellationToken = default)
     {
         ScreenBounds? screenBounds = null;
 
@@ -282,17 +302,17 @@ public sealed class MouseInputService
 
             if (!isValid)
             {
-                return Task.FromResult(MouseControlResult.CreateFailure(
+                return MouseControlResult.CreateFailure(
                     MouseControlErrorCode.CoordinatesOutOfBounds,
                     $"Coordinates ({x.Value}, {y.Value}) are out of bounds. Valid bounds: Left={bounds.Left}, Top={bounds.Top}, Right={bounds.Right}, Bottom={bounds.Bottom}",
-                    bounds));
+                    bounds);
             }
 
             // Move to the coordinates first
-            var moveResult = MoveAsync(x.Value, y.Value, cancellationToken).GetAwaiter().GetResult();
+            var moveResult = await MoveAsync(x.Value, y.Value, cancellationToken);
             if (!moveResult.Success)
             {
-                return Task.FromResult(moveResult);
+                return moveResult;
             }
         }
 
@@ -305,6 +325,10 @@ public sealed class MouseInputService
 
         // Press modifier keys before the double-click
         var pressedModifiers = _modifierKeyManager.PressModifiers(modifiers);
+
+        // The barrier must be live before the input is sent, or the hook can miss the first events.
+        using var barrier = InjectedInputBarrier.Start(expectedButtonUps: 2);
+        var barrierInstalled = await barrier.WaitForInstallAsync(BarrierInstallTimeout);
 
         try
         {
@@ -327,7 +351,7 @@ public sealed class MouseInputService
                             MouseData = 0,
                             DwFlags = NativeConstants.MOUSEEVENTF_LEFTDOWN,
                             Time = 0,
-                            DwExtraInfo = 0,
+                            DwExtraInfo = barrier.Marker,
                         },
                     },
                 },
@@ -344,7 +368,7 @@ public sealed class MouseInputService
                             MouseData = 0,
                             DwFlags = NativeConstants.MOUSEEVENTF_LEFTUP,
                             Time = 0,
-                            DwExtraInfo = 0,
+                            DwExtraInfo = barrier.Marker,
                         },
                     },
                 },
@@ -361,7 +385,7 @@ public sealed class MouseInputService
                             MouseData = 0,
                             DwFlags = NativeConstants.MOUSEEVENTF_LEFTDOWN,
                             Time = 0,
-                            DwExtraInfo = 0,
+                            DwExtraInfo = barrier.Marker,
                         },
                     },
                 },
@@ -378,7 +402,7 @@ public sealed class MouseInputService
                             MouseData = 0,
                             DwFlags = NativeConstants.MOUSEEVENTF_LEFTUP,
                             Time = 0,
-                            DwExtraInfo = 0,
+                            DwExtraInfo = barrier.Marker,
                         },
                     },
                 },
@@ -391,10 +415,17 @@ public sealed class MouseInputService
             {
                 var error = Marshal.GetLastWin32Error();
                 var (errorCode, errorMessage) = MapSendInputError(error);
-                return Task.FromResult(MouseControlResult.CreateFailure(
+                return MouseControlResult.CreateFailure(
                     errorCode,
                     errorMessage,
-                    screenBounds));
+                    screenBounds);
+            }
+
+            // Do not return while part of the sequence is still in the system input queue: the next
+            // injected input would interleave ahead of it. See the method remarks for the timeout policy.
+            if (barrierInstalled)
+            {
+                _ = await barrier.WaitForCompletionAsync(BarrierCompletionTimeout);
             }
 
             // Get the final cursor position
@@ -402,7 +433,7 @@ public sealed class MouseInputService
             var finalPosition = new Coordinates(finalPos.X, finalPos.Y);
 
             var successResult = MouseControlResult.CreateSuccess(finalPosition, screenBounds);
-            return Task.FromResult(successResult with { TargetWindow = targetWindowInfo });
+            return successResult with { TargetWindow = targetWindowInfo };
         }
         finally
         {
@@ -622,7 +653,9 @@ public sealed class MouseInputService
     /// <remarks>
     /// <see cref="DragAsync"/> is the two-point case of this method, so drag and stroke can never diverge.
     /// Every move after the press is sent with <c>MOUSEEVENTF_MOVE_NOCOALESCE</c> so no vertex is dropped when the
-    /// target thread is busy. The button is always released in a <c>finally</c> block, even when a move fails partway through.
+    /// target thread is busy. The button is always released in a <c>finally</c> block, even when a move fails partway
+    /// through, and the release itself is verified: a stroke whose button-up could not be injected reports failure
+    /// rather than leaving the button silently held.
     /// </remarks>
     public async Task<MouseControlResult> StrokeAsync(
         IReadOnlyList<Coordinates> points,
@@ -718,58 +751,111 @@ public sealed class MouseInputService
                     screenBounds);
             }
 
+            MouseControlResult strokeResult;
+            var releaseError = 0;
             try
             {
+                MouseControlResult? failedMove = null;
+
                 // Step 3: Trace through the remaining points with the button held
                 for (var i = 1; i < points.Count; i++)
                 {
                     var moveResult = await MoveForStrokeAsync(points[i].X, points[i].Y, cancellationToken);
                     if (!moveResult.Success)
                     {
-                        // Even if a move fails, the button is released in finally
-                        return moveResult;
+                        // Even if a move fails, the button is released, and that release verified, below
+                        failedMove = moveResult;
+                        break;
                     }
                 }
 
-                // Get the final cursor position
-                NativeMethods.GetCursorPos(out var finalPos);
-                var finalPosition = new Coordinates(finalPos.X, finalPos.Y);
-
-                var successResult = MouseControlResult.CreateSuccess(finalPosition, screenBounds);
-                return successResult with { TargetWindow = targetWindowInfo };
+                if (failedMove != null)
+                {
+                    strokeResult = failedMove;
+                }
+                else
+                {
+                    // Get the final cursor position
+                    NativeMethods.GetCursorPos(out var finalPos);
+                    var finalPosition = new Coordinates(finalPos.X, finalPos.Y);
+                    strokeResult = MouseControlResult.CreateSuccess(finalPosition, screenBounds) with { TargetWindow = targetWindowInfo };
+                }
             }
             finally
             {
-                // Step 4: Always release the mouse button, even on failure
-                var buttonUpInput = new INPUT[]
-                {
-                    new INPUT
-                    {
-                        Type = NativeConstants.INPUT_MOUSE,
-                        Data = new INPUTUNION
-                        {
-                            Mouse = new MOUSEINPUT
-                            {
-                                Dx = 0,
-                                Dy = 0,
-                                MouseData = 0,
-                                DwFlags = buttonUpFlag,
-                                Time = 0,
-                                DwExtraInfo = 0,
-                            },
-                        },
-                    },
-                };
-
-                // Send button up - ignore result since we're in finally block
-                _ = NativeMethods.SendInput(1, buttonUpInput, INPUT.Size);
+                // Step 4: Always release the mouse button, even on failure, and record whether the
+                // release itself was injected. On an exception path the error cannot reach the result,
+                // but the retry inside still gives the release its best chance.
+                releaseError = SendStrokeButtonUp(buttonUpFlag);
             }
+
+            if (releaseError != 0)
+            {
+                var (releaseErrorCode, releaseErrorMessage) = MapSendInputError(releaseError);
+                var stuckButtonWarning =
+                    $"The button release failed ({releaseErrorMessage}), so the physical mouse button may still be held down. " +
+                    "Send a click at the current position to release it: the click's button-up event clears the held state.";
+                strokeResult = strokeResult.Success
+                    ? MouseControlResult.CreateFailure(
+                        releaseErrorCode,
+                        $"The stroke traced all points, but the button was not released. {stuckButtonWarning}",
+                        screenBounds)
+                    : strokeResult with { Error = $"{strokeResult.Error} {stuckButtonWarning}" };
+            }
+
+            return strokeResult;
         }
         finally
         {
             // Always release modifiers that we pressed, even on failure
             _modifierKeyManager.ReleaseModifiers(pressedModifiers);
         }
+    }
+
+    /// <summary>
+    /// Sends the stroke's button-up event and verifies it was injected, retrying once on failure.
+    /// </summary>
+    /// <param name="buttonUpFlag">The MOUSEEVENTF_*UP flag matching the pressed button.</param>
+    /// <returns>Zero when the release was injected; otherwise the last Win32 error from SendInput.</returns>
+    /// <remarks>
+    /// The stroke API promises the button never stays held, so the release result cannot be
+    /// discarded: a failed SendInput here leaves the button physically stuck down and turns every
+    /// later click into a drag. The caller surfaces a non-zero return as a failed stroke.
+    /// </remarks>
+    private static int SendStrokeButtonUp(uint buttonUpFlag)
+    {
+        var buttonUpInput = new INPUT[]
+        {
+            new INPUT
+            {
+                Type = NativeConstants.INPUT_MOUSE,
+                Data = new INPUTUNION
+                {
+                    Mouse = new MOUSEINPUT
+                    {
+                        Dx = 0,
+                        Dy = 0,
+                        MouseData = 0,
+                        DwFlags = buttonUpFlag,
+                        Time = 0,
+                        DwExtraInfo = 0,
+                    },
+                },
+            },
+        };
+
+        var lastError = 0;
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            if (NativeMethods.SendInput(1, buttonUpInput, INPUT.Size) == 1)
+            {
+                return 0;
+            }
+
+            lastError = Marshal.GetLastWin32Error();
+        }
+
+        return lastError;
     }
 
     /// <inheritdoc />

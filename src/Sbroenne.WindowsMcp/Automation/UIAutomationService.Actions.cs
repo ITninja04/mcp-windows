@@ -631,29 +631,9 @@ public sealed partial class UIAutomationService
             }
 
             var handle = windowHandle;
-            if (!handle.HasValue || handle.Value == IntPtr.Zero)
+            if ((!handle.HasValue || handle.Value == IntPtr.Zero) && TryGetElementWindowHandle(element, out var elementHandle))
             {
-                // Walk up to find a window
-                var current = element;
-                var walker = Uia.ControlViewWalker;
-                while (current != null)
-                {
-                    try
-                    {
-                        var hwnd = current.CurrentNativeWindowHandle;
-                        if (hwnd != 0)
-                        {
-                            handle = new IntPtr(hwnd);
-                            break;
-                        }
-
-                        current = walker.GetParentElement(current);
-                    }
-                    catch
-                    {
-                        break;
-                    }
-                }
+                handle = elementHandle;
             }
 
             if (!handle.HasValue || handle.Value == IntPtr.Zero)
@@ -673,6 +653,65 @@ public sealed partial class UIAutomationService
         {
             return false;
         }
+    }
+
+    /// <summary>
+    /// Resolves the nearest native window handle for <paramref name="element"/> by walking up the
+    /// control view until an ancestor exposes an HWND. Must run on the UIA STA thread.
+    /// </summary>
+    private static bool TryGetElementWindowHandle(UIA.IUIAutomationElement element, out nint handle)
+    {
+        handle = 0;
+        var current = element;
+        var walker = Uia.ControlViewWalker;
+        while (current != null)
+        {
+            try
+            {
+                var hwnd = current.CurrentNativeWindowHandle;
+                if (hwnd != 0)
+                {
+                    handle = hwnd;
+                    return true;
+                }
+
+                current = walker.GetParentElement(current);
+            }
+            catch
+            {
+                break;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Verifies that an explicitly supplied window handle belongs to the same top-level window as
+    /// <paramref name="element"/>. Must run on the UIA STA thread.
+    /// </summary>
+    /// <returns>
+    /// True when the handles share a top-level window, or when the element exposes no HWND to
+    /// compare against. False only on a confirmed mismatch, with both roots reported for the error message.
+    /// </returns>
+    /// <remarks>
+    /// A supplied handle is an activation hint, not an override. Physical input is injected at the
+    /// element's own screen coordinates, so a handle from a different top-level window would bring
+    /// that window to the foreground and then click into it at the element's position - unrelated
+    /// content receives a double-click. Both handles are normalized with GA_ROOT because callers may
+    /// pass a child control handle and elements resolve to their nearest HWND-bearing ancestor.
+    /// </remarks>
+    private static bool VerifyHandleOwnsElement(UIA.IUIAutomationElement element, nint suppliedHandle, out nint suppliedRoot, out nint elementRoot)
+    {
+        suppliedRoot = NativeMethods.GetAncestor(suppliedHandle, NativeConstants.GA_ROOT);
+        elementRoot = 0;
+        if (!TryGetElementWindowHandle(element, out var elementHandle))
+        {
+            return true;
+        }
+
+        elementRoot = NativeMethods.GetAncestor(elementHandle, NativeConstants.GA_ROOT);
+        return elementRoot == 0 || suppliedRoot == elementRoot;
     }
 
     /// <summary>
@@ -881,6 +920,19 @@ public sealed partial class UIAutomationService
                     "double_click",
                     UIAutomationErrorType.ElementNotFound,
                     $"Element with ID '{elementId}' could not be resolved.",
+                    CreateDiagnostics(stopwatch)), Element: (UIA.IUIAutomationElement?)null, Root: (UIA.IUIAutomationElement?)null, Point: (Point?)null, Initial: default(ElementActionState));
+            }
+
+            // A supplied handle must own the element before it may drive activation: physical input lands at
+            // the element's coordinates, so activating a different window would double-click unrelated content.
+            if (activationHandle.HasValue && activationHandle.Value != IntPtr.Zero
+                && !VerifyHandleOwnsElement(element, activationHandle.Value, out var suppliedRoot, out var elementRoot))
+            {
+                return (Failure: UIAutomationResult.CreateFailure(
+                    "double_click",
+                    UIAutomationErrorType.InvalidParameter,
+                    $"windowHandle '{windowHandle}' (top-level {suppliedRoot}) does not own element '{elementId}' (top-level {elementRoot}). " +
+                    "Pass the handle of the element's own window from window_management, or omit windowHandle to let the element resolve it.",
                     CreateDiagnostics(stopwatch)), Element: (UIA.IUIAutomationElement?)null, Root: (UIA.IUIAutomationElement?)null, Point: (Point?)null, Initial: default(ElementActionState));
             }
 

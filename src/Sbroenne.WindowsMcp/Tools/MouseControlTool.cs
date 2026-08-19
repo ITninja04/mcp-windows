@@ -423,7 +423,7 @@ public static partial class MouseControlTool
                 // Attach target window info for input operations (not get_position)
                 if (action != MouseAction.GetPosition)
                 {
-                    operationResult = await AttachTargetWindowInfoAsync(operationResult, linkedToken);
+                    operationResult = await AttachTargetWindowInfoAsync(operationResult, linkedToken, cancellationToken);
                 }
             }
 
@@ -799,7 +799,17 @@ public static partial class MouseControlTool
         };
     }
 
-    private static async Task<MouseControlResult> AttachTargetWindowInfoAsync(MouseControlResult result, CancellationToken cancellationToken)
+    /// <summary>
+    /// Best-effort enrichment of a successful input result with the current foreground window.
+    /// </summary>
+    /// <remarks>
+    /// Runs after the input has already been sent, so failures here must not turn a completed
+    /// operation into a fabricated error: any lookup failure, including the internal timeout firing
+    /// mid-lookup, returns the result unchanged. The one exception is caller cancellation, which is
+    /// rethrown so the outer handler can distinguish it from the timeout and propagate a cancelled
+    /// request instead of returning success.
+    /// </remarks>
+    internal static async Task<MouseControlResult> AttachTargetWindowInfoAsync(MouseControlResult result, CancellationToken linkedToken, CancellationToken callerToken)
     {
         try
         {
@@ -809,7 +819,7 @@ public static partial class MouseControlTool
                 return result;
             }
 
-            var windowInfo = await WindowsToolsBase.WindowEnumerator.GetWindowInfoAsync(foregroundHandle, cancellationToken);
+            var windowInfo = await WindowsToolsBase.WindowEnumerator.GetWindowInfoAsync(foregroundHandle, linkedToken);
             if (windowInfo == null)
             {
                 return result;
@@ -819,6 +829,10 @@ public static partial class MouseControlTool
             {
                 TargetWindow = TargetWindowInfo.FromFullWindowInfo(windowInfo)
             };
+        }
+        catch (OperationCanceledException) when (callerToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch
         {
