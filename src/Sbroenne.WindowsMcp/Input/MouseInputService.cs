@@ -323,12 +323,13 @@ public sealed class MouseInputService
         NativeMethods.GetCursorPos(out var currentPos);
         var targetWindowInfo = GetTargetWindowInfoAtPoint(currentPos.X, currentPos.Y);
 
-        // Press modifier keys before the double-click
-        var pressedModifiers = _modifierKeyManager.PressModifiers(modifiers);
-
         // The barrier must be live before the input is sent, or the hook can miss the first events.
+        // Install it before the modifiers go down so a slow hook install never holds Ctrl/Shift/Alt.
         using var barrier = InjectedInputBarrier.Start(expectedButtonUps: 2);
         var barrierInstalled = await barrier.WaitForInstallAsync(BarrierInstallTimeout);
+
+        // Press modifier keys before the double-click
+        var pressedModifiers = _modifierKeyManager.PressModifiers(modifiers);
 
         try
         {
